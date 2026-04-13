@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Q1 — Metabase Infrastructure Architecture</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.6.1/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 32px 24px;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    header h1 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: #60a5fa;
+      letter-spacing: -0.5px;
+    }
+    header p {
+      margin-top: 8px;
+      color: #94a3b8;
+      font-size: 0.95rem;
+    }
+    .badge {
+      display: inline-block;
+      background: #1e3a5f;
+      color: #93c5fd;
+      border: 1px solid #2563eb;
+      border-radius: 20px;
+      padding: 3px 12px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      margin: 4px;
+    }
+    .diagram-wrapper {
+      background: #1a1d27;
+      border: 1px solid #2d3748;
+      border-radius: 16px;
+      padding: 32px;
+      margin-bottom: 32px;
+      overflow-x: auto;
+    }
+    .diagram-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: #f1f5f9;
+      margin-bottom: 20px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #2d3748;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+      margin-top: 32px;
+    }
+    .legend-card {
+      background: #1a1d27;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .legend-card h3 {
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: #60a5fa;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .legend-card ul {
+      list-style: none;
+      font-size: 0.85rem;
+      color: #94a3b8;
+      line-height: 1.7;
+    }
+    .legend-card ul li::before { content: "→ "; color: #4ade80; }
+    .mermaid { display: flex; justify-content: center; }
+    .mermaid svg { max-width: 100% !important; height: auto !important; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🏗️ Question 1 — Metabase Infrastructure Architecture</h1>
+  <p>Coraline Challenge | Platform Engineer Assignment</p>
+  <br/>
+  <span class="badge">☁️ AWS ap-southeast-1</span>
+  <span class="badge">🐳 ECS Fargate</span>
+  <span class="badge">🗄️ RDS PostgreSQL 15</span>
+  <span class="badge">🔒 Private Subnets</span>
+  <span class="badge">🔑 Secrets Manager</span>
+  <span class="badge">⚖️ ALB + HTTPS</span>
+  <span class="badge">🖥️ Docker Local</span>
+</header>
+
+<!-- ── Main Architecture Diagram ─────────────────────────────────────── -->
+<div class="diagram-wrapper">
+  <div class="diagram-title">🗺️ Full System Architecture — AWS Cloud (ap-southeast-1)</div>
+  <div class="mermaid">
+graph TB
+    INET(["🌐 Internet\nPublic Traffic"])
+    DNS["🔀 Route 53\nDNS — metabase.example.com"]
+
+    subgraph AWS["☁️  AWS Cloud — ap-southeast-1  (Singapore)"]
+
+        subgraph VPC["🔒  VPC  10.0.0.0/16"]
+
+            subgraph PUB["🟢  Public Tier  —  Internet-facing"]
+                IGW["🌉 Internet\nGateway"]
+                subgraph PUB_A["Public Subnet AZ-A  10.0.1.0/24"]
+                    NAT_A["🔄 NAT\nGateway A"]
+                end
+                subgraph PUB_B["Public Subnet AZ-B  10.0.2.0/24"]
+                    NAT_B["🔄 NAT\nGateway B"]
+                end
+                ALB["⚖️ Application Load Balancer\nHTTPS :443 · HTTP :80 → 301 redirect\nSSL/TLS Termination"]
+            end
+
+            subgraph APP["🔵  Private App Tier  —  No direct internet access"]
+                subgraph APP_A["Private Subnet AZ-A  10.0.11.0/24"]
+                    ECS_A["🐳 ECS Fargate Task\nMetabase v0.50\nCPU 1vCPU · RAM 2GB\nPort :3000"]
+                end
+                subgraph APP_B["Private Subnet AZ-B  10.0.12.0/24"]
+                    ECS_B["🐳 ECS Fargate Task\nMetabase v0.50\nCPU 1vCPU · RAM 2GB\nPort :3000"]
+                end
+            end
+
+            subgraph DB["🔴  Private DB Tier  —  Isolated, zero public route"]
+                subgraph DB_A["Private Subnet AZ-A  10.0.21.0/24"]
+                    RDS_P["🗄️ RDS PostgreSQL 15\nPrimary Instance\ndb.t3.small · Encrypted\npubliclyAccessible = false"]
+                end
+                subgraph DB_B["Private Subnet AZ-B  10.0.22.0/24"]
+                    RDS_S["🗄️ RDS PostgreSQL 15\nStandby — Multi-AZ\nAuto Failover < 60s"]
+                end
+            end
+
+        end
+
+        SM["🔑 AWS Secrets Manager\nDB username + password\nHost · Port · DBname\nAuto-rotation ready"]
+        CW["📊 CloudWatch\nContainer Logs 30d\nCPU · Memory · 5xx Alarms\nRDS Performance Insights"]
+        VPCE["🔗 VPC Endpoints\nSecrets Manager\nECR API + DKR\nCW Logs · S3"]
+
+    end
+
+    %% Traffic flow
+    INET -->|"HTTPS/HTTP"| DNS
+    DNS -->|"Alias record"| ALB
+    IGW --> ALB
+    ALB -->|"Forward :3000\nsg: alb only"| ECS_A
+    ALB -->|"Forward :3000\nsg: alb only"| ECS_B
+
+    %% App → DB (private only)
+    ECS_A -->|"PostgreSQL :5432\nsg: metabase only\nNOT public"| RDS_P
+    ECS_B -->|"PostgreSQL :5432\nsg: metabase only\nNOT public"| RDS_P
+    RDS_P -.->|"Sync Replication\nAWS Managed"| RDS_S
+
+    %% Secrets fetch (via VPC endpoint — no NAT needed)
+    ECS_A -->|"GetSecretValue\nTLS · IAM scoped"| VPCE
+    ECS_B -->|"GetSecretValue\nTLS · IAM scoped"| VPCE
+    VPCE --- SM
+
+    %% Outbound (NAT for image pull / updates)
+    ECS_A -->|"Outbound via\nVPC Endpoint"| CW
+    ECS_B -->|"Outbound via\nVPC Endpoint"| CW
+
+    %% NAT fallback
+    ECS_A -.->|"Fallback NAT\n(image pull)"| NAT_A
+    ECS_B -.->|"Fallback NAT\n(image pull)"| NAT_B
+    NAT_A -.->|"EIP → Internet"| IGW
+    NAT_B -.->|"EIP → Internet"| IGW
+
+    %% Styling
+    classDef internet fill:#1e293b,stroke:#60a5fa,color:#60a5fa,rx:8
+    classDef alb fill:#065f46,stroke:#10b981,color:#ecfdf5
+    classDef ecs fill:#1e3a5f,stroke:#3b82f6,color:#bfdbfe
+    classDef rds fill:#4c1d1d,stroke:#ef4444,color:#fecaca
+    classDef secrets fill:#3b1f5e,stroke:#a855f7,color:#e9d5ff
+    classDef monitoring fill:#1c2e1c,stroke:#4ade80,color:#bbf7d0
+    classDef nat fill:#374151,stroke:#9ca3af,color:#f9fafb
+    classDef vpce fill:#292524,stroke:#78716c,color:#d6d3d1
+
+    class INET,DNS internet
+    class ALB,IGW alb
+    class ECS_A,ECS_B ecs
+    class RDS_P,RDS_S rds
+    class SM secrets
+    class CW monitoring
+    class NAT_A,NAT_B nat
+    class VPCE vpce
+  </div>
+</div>
+
+<!-- ── Local Docker Deployment ────────────────────────────────────────── -->
+<div class="diagram-wrapper">
+  <div class="diagram-title">🖥️ Local Docker Deployment — docker compose up</div>
+  <div class="mermaid">
+graph LR
+    subgraph HOST["💻 Developer Machine (localhost)"]
+        BROWSER["🌐 Browser\nlocalhost:3000"]
+    end
+
+    subgraph DOCKER["🐳 Docker Network — internal (bridge)"]
+        subgraph MB_C["metabase container\nmetabase/metabase:v0.50.0"]
+            MB_PORT["Port 3000\n(exposed to host)"]
+            MB_ENV["MB_DB_TYPE=postgres\nMB_DB_HOST=postgres\nMB_DB_PORT=5432\nMB_DB_DBNAME / USER / PASS\n← from .env file"]
+        end
+
+        subgraph PG_C["postgres container\npostgres:15-alpine"]
+            PG_INTERNAL["Port 5432\n(internal only — NOT exposed)"]
+            PG_VOLUME["📁 postgres_data volume\n(persistent)"]
+            PG_ENV["POSTGRES_DB=testcoralineappdb\nPOSTGRES_USER=testcoraline\nPOSTGRES_PASSWORD=testcoraline2026"]
+        end
+    end
+
+    BROWSER -->|"HTTP :3000"| MB_PORT
+    MB_ENV -->|"depends_on: service_healthy\nconnection: postgres:5432"| PG_INTERNAL
+    PG_INTERNAL --- PG_VOLUME
+
+    classDef metabase fill:#1e3a5f,stroke:#3b82f6,color:#bfdbfe
+    classDef postgres fill:#4c1d1d,stroke:#ef4444,color:#fecaca
+    classDef host fill:#1e293b,stroke:#64748b,color:#cbd5e1
+    classDef docker fill:#1a1d27,stroke:#2d3748,color:#f1f5f9
+
+    class MB_C,MB_PORT,MB_ENV metabase
+    class PG_C,PG_INTERNAL,PG_VOLUME,PG_ENV postgres
+    class HOST,BROWSER host
+  </div>
+  <div style="margin-top:20px;display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+    <div class="legend-card">
+      <h3>🚀 Quick Start</h3>
+      <ul>
+        <li><code>cd question-1/docker</code></li>
+        <li><code>docker compose up -d</code></li>
+        <li>Open <code>http://localhost:3000</code></li>
+        <li>Wait ~2 min for Metabase init</li>
+        <li>Connect DB: host=<code>postgres</code>, port=<code>5432</code></li>
+      </ul>
+    </div>
+    <div class="legend-card">
+      <h3>🔒 Security Mirror (AWS)</h3>
+      <ul>
+        <li>PostgreSQL has <strong>no host port binding</strong></li>
+        <li>Only Metabase container can reach DB</li>
+        <li>Mirrors AWS: RDS has no public route</li>
+        <li>Credentials loaded from <code>.env</code> file</li>
+        <li>Volume persists data between restarts</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ── Security Group Flow Diagram ───────────────────────────────────── -->
+<div class="diagram-wrapper">
+  <div class="diagram-title">🛡️ Security Group & Network Flow</div>
+  <div class="mermaid">
+flowchart LR
+    subgraph INET["Internet"]
+        USER["👤 User\n0.0.0.0/0"]
+    end
+
+    subgraph SG_ALB["sg: alb-sg"]
+        ALB_IN["✅ Inbound\n:80 TCP from 0.0.0.0/0\n:443 TCP from 0.0.0.0/0"]
+        ALB_OUT["✅ Outbound\n:3000 TCP → metabase-sg"]
+    end
+
+    subgraph SG_MB["sg: metabase-sg"]
+        MB_IN["✅ Inbound\n:3000 TCP from alb-sg ONLY"]
+        MB_OUT["✅ Outbound\n:5432 TCP → rds-sg\n:443 TCP → AWS Services"]
+    end
+
+    subgraph SG_RDS["sg: rds-sg"]
+        RDS_IN["✅ Inbound\n:5432 TCP from metabase-sg ONLY"]
+        RDS_OUT["❌ No Egress Rules\n(RDS does not initiate)"]
+    end
+
+    subgraph BLOCKED["🚫 Blocked — Cannot Access DB"]
+        HACK["🚫 Public Internet\ncannot reach :5432\nNo route to DB subnets"]
+    end
+
+    USER -->|"HTTP/HTTPS"| SG_ALB
+    SG_ALB -->|"Port 3000 only"| SG_MB
+    SG_MB -->|"Port 5432 only"| SG_RDS
+    INET -.->|"❌ BLOCKED\nNo public route"| SG_RDS
+
+    style BLOCKED fill:#4c1d1d,stroke:#ef4444,color:#fecaca
+    style INET fill:#1e293b,stroke:#64748b,color:#cbd5e1
+    style SG_ALB fill:#064e3b,stroke:#10b981,color:#d1fae5
+    style SG_MB fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    style SG_RDS fill:#3b1f1f,stroke:#dc2626,color:#fee2e2
+  </div>
+</div>
+
+<!-- ── Legend Cards ───────────────────────────────────────────────────── -->
+<div class="legend">
+  <div class="legend-card">
+    <h3>🔒 Security Design</h3>
+    <ul>
+      <li>PostgreSQL <strong>never</strong> publicly accessible</li>
+      <li>DB subnets have zero internet route</li>
+      <li>Security Groups follow least-privilege</li>
+      <li>RDS accepts connections from ECS only</li>
+      <li>All storage encrypted at rest (AES-256)</li>
+      <li>TLS 1.3 enforced on ALB</li>
+    </ul>
+  </div>
+  <div class="legend-card">
+    <h3>🔑 Secret Management</h3>
+    <ul>
+      <li>Password auto-generated by Terraform (32 chars)</li>
+      <li>Stored in AWS Secrets Manager as JSON</li>
+      <li>ECS fetches via <code>secrets:</code> — never in env vars</li>
+      <li>IAM policy scoped to specific secret ARN</li>
+      <li>Accessed via VPC Endpoint (no NAT cost)</li>
+      <li>Recovery window: 7 days before permanent delete</li>
+    </ul>
+  </div>
+  <div class="legend-card">
+    <h3>⚡ High Availability</h3>
+    <ul>
+      <li>2 AZs — ap-southeast-1a + 1b</li>
+      <li>RDS Multi-AZ with automatic failover</li>
+      <li>ECS auto-scaling (CPU > 70% / Memory > 80%)</li>
+      <li>ALB health check on <code>/api/health</code></li>
+      <li>ECS deployment circuit breaker with auto-rollback</li>
+      <li>NAT Gateway per AZ for resilience</li>
+    </ul>
+  </div>
+  <div class="legend-card">
+    <h3>📊 Observability</h3>
+    <ul>
+      <li>CloudWatch Container Insights enabled</li>
+      <li>ECS container logs → /ecs/coraline-metabase-prod</li>
+      <li>RDS Enhanced Monitoring (60s interval)</li>
+      <li>RDS Performance Insights (7-day retention)</li>
+      <li>ALB access logs → S3 (90-day lifecycle)</li>
+      <li>Alarms: CPU, Memory, 5xx, Healthy Hosts, Storage</li>
+    </ul>
+  </div>
+  <div class="legend-card">
+    <h3>🌐 Network Topology</h3>
+    <ul>
+      <li>VPC CIDR: 10.0.0.0/16</li>
+      <li>Public: 10.0.1-2.0/24 (ALB, NAT GW)</li>
+      <li>Private App: 10.0.11-12.0/24 (ECS)</li>
+      <li>Private DB: 10.0.21-22.0/24 (RDS only)</li>
+      <li>VPC Endpoints: Secrets, ECR, CW, S3</li>
+      <li>DB subnet route table: no default route</li>
+    </ul>
+  </div>
+  <div class="legend-card">
+    <h3>🐳 Metabase Config</h3>
+    <ul>
+      <li>Image: metabase/metabase:v0.50.0</li>
+      <li>Launch type: ECS Fargate (serverless)</li>
+      <li>CPU: 1 vCPU | Memory: 2 GB</li>
+      <li>Health check: /api/health (startPeriod 120s)</li>
+      <li>Timezone: Asia/Bangkok (ICT UTC+7)</li>
+      <li>Auto-scaling: 1–4 tasks</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#1e3a5f',
+      primaryTextColor: '#e2e8f0',
+      primaryBorderColor: '#3b82f6',
+      lineColor: '#64748b',
+      secondaryColor: '#1e293b',
+      tertiaryColor: '#0f172a',
+      background: '#0f1117',
+      mainBkg: '#1a1d27',
+      nodeBorder: '#4b5563',
+      clusterBkg: '#1e293b',
+      titleColor: '#f1f5f9',
+      edgeLabelBackground: '#1e293b',
+      fontFamily: 'Segoe UI, system-ui, sans-serif'
+    },
+    flowchart: {
+      curve: 'basis',
+      padding: 20,
+      nodeSpacing: 50,
+      rankSpacing: 60
+    },
+    securityLevel: 'loose'
+  });
+</script>
+</body>
+</html>

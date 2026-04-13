@@ -1,0 +1,226 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: frontend
+  namespace: prod
+  labels:
+    app: frontend
+  annotations:
+    notifications.argoproj.io/subscribe.on-rollout-step-completed.slack: platform-releases
+    notifications.argoproj.io/subscribe.on-rollout-aborted.pagerduty: oncall
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+
+  selector:
+    matchLabels:
+      app: frontend
+
+  template:
+    metadata:
+      labels:
+        app: frontend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "80"
+        prometheus.io/path: "/nginx_status"
+    spec:
+      serviceAccountName: frontend-sa
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: frontend
+          image: 123456789.dkr.ecr.ap-southeast-1.amazonaws.com/coraline/webapp-frontend:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              protocol: TCP
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+
+          envFrom:
+            - configMapRef:
+                name: frontend-config-prod
+
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /run
+
+      volumes:
+        - name: nginx-cache
+          emptyDir:
+            sizeLimit: 100Mi
+        - name: tmp
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: frontend
+
+  strategy:
+    canary:
+      canaryService: frontend-canary
+      stableService: frontend-stable
+
+      trafficRouting:
+        nginx:
+          stableIngress: frontend-ingress-stable
+          additionalIngressAnnotations:
+            nginx.ingress.kubernetes.io/canary: "true"
+            nginx.ingress.kubernetes.io/canary-by-header: "X-Canary"
+            nginx.ingress.kubernetes.io/canary-by-header-value: "true"
+            nginx.ingress.kubernetes.io/canary-weight: "0"
+
+      steps:
+        - setWeight: 0
+        - pause:
+            duration: 5m
+
+        - setWeight: 10
+        - pause:
+            duration: 5m
+
+        - analysis:
+            templates:
+              - templateName: frontend-canary-analysis
+            args:
+              - name: service-name
+                value: frontend-canary
+              - name: namespace
+                value: prod
+              - name: canary-url
+                value: https://app.coraline.example.com
+
+        - setWeight: 50
+        - pause:
+            duration: 5m
+
+        - analysis:
+            templates:
+              - templateName: frontend-canary-analysis
+            args:
+              - name: service-name
+                value: frontend-canary
+              - name: namespace
+                value: prod
+              - name: canary-url
+                value: https://app.coraline.example.com
+
+        - setWeight: 100
+
+      autoPromotionEnabled: false
+      maxSurge: "25%"
+      maxUnavailable: 0
+      scaleDownDelaySeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-stable
+  namespace: prod
+  labels:
+    app: frontend
+    role: stable
+spec:
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 80
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-canary
+  namespace: prod
+  labels:
+    app: frontend
+    role: canary
+spec:
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 80
+  type: ClusterIP
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend-pdb
+  namespace: prod
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: frontend
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend-hpa
+  namespace: prod
+spec:
+  scaleTargetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: frontend
+  minReplicas: 3
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Q2 — Canary Deployment Strategy</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.6.1/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 32px 24px;
+    }
+    header { text-align: center; margin-bottom: 32px; }
+    header h1 { font-size: 1.8rem; font-weight: 700; color: #f59e0b; }
+    header p { margin-top: 8px; color: #94a3b8; font-size: 0.95rem; }
+    .badge {
+      display: inline-block;
+      background: #3b2b00;
+      color: #fbbf24;
+      border: 1px solid #d97706;
+      border-radius: 20px;
+      padding: 3px 12px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      margin: 4px;
+    }
+    .section { margin-bottom: 32px; }
+    .diagram-wrapper {
+      background: #1a1d27;
+      border: 1px solid #2d3748;
+      border-radius: 16px;
+      padding: 28px;
+      overflow-x: auto;
+      margin-bottom: 24px;
+    }
+    .diagram-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: #f1f5f9;
+      margin-bottom: 20px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #2d3748;
+    }
+    /* Traffic split visualiser */
+    .split-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .split-card {
+      background: #1a1d27;
+      border: 1px solid #2d3748;
+      border-radius: 14px;
+      padding: 20px 16px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .split-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0;
+      height: 4px;
+      width: 100%;
+    }
+    .split-card.s0::before  { background: #64748b; }
+    .split-card.s10::before { background: #f59e0b; }
+    .split-card.s25::before { background: #f97316; }
+    .split-card.s50::before { background: #ef4444; }
+    .split-card .step-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-bottom: 8px;
+    }
+    .split-card .step-num {
+      font-size: 2.2rem;
+      font-weight: 800;
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+    .split-card.s0  .step-num { color: #94a3b8; }
+    .split-card.s10 .step-num { color: #f59e0b; }
+    .split-card.s25 .step-num { color: #f97316; }
+    .split-card.s50 .step-num { color: #ef4444; }
+    .split-card .step-unit { font-size: 0.9rem; color: #64748b; margin-bottom: 12px; }
+    .traffic-bar {
+      height: 8px;
+      border-radius: 4px;
+      background: #1e293b;
+      margin-bottom: 10px;
+      overflow: hidden;
+    }
+    .traffic-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.5s ease;
+    }
+    .s0  .traffic-bar-fill { width: 0%;   background: #64748b; }
+    .s10 .traffic-bar-fill { width: 10%;  background: #f59e0b; }
+    .s25 .traffic-bar-fill { width: 25%;  background: #f97316; }
+    .s50 .traffic-bar-fill { width: 50%;  background: #ef4444; }
+    .split-card p { font-size: 0.78rem; color: #64748b; line-height: 1.5; }
+    .split-card .pause-badge {
+      display: inline-block;
+      background: #1e293b;
+      color: #94a3b8;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 0.72rem;
+      margin-top: 6px;
+    }
+    /* Metrics table */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      margin-bottom: 28px;
+    }
+    .metric-card {
+      background: #1a1d27;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .metric-card .metric-name {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .metric-card .metric-threshold {
+      font-size: 1.4rem;
+      font-weight: 800;
+      color: #4ade80;
+      margin-bottom: 4px;
+    }
+    .metric-card .metric-desc {
+      font-size: 0.8rem;
+      color: #64748b;
+      line-height: 1.5;
+    }
+    .metric-card .metric-desc span { color: #ef4444; }
+    .mermaid { display: flex; justify-content: center; }
+    .mermaid svg { max-width: 100% !important; height: auto !important; }
+    @media (max-width: 768px) {
+      .split-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🐤 Canary Deployment Strategy</h1>
+  <p>Argo Rollouts · Progressive Traffic Shifting · Automated Analysis · Auto-Abort</p>
+  <br/>
+  <span class="badge">☸️ Argo Rollouts</span>
+  <span class="badge">📊 AnalysisTemplate</span>
+  <span class="badge">🔀 Nginx Canary</span>
+  <span class="badge">📈 Prometheus Metrics</span>
+  <span class="badge">↩️ Auto-Abort</span>
+  <span class="badge">🔵🟢 Blue/Green (Scheduler)</span>
+</header>
+
+<!-- ── Traffic Split Phases ──────────────────────────────────────────── -->
+<div class="split-grid">
+  <div class="split-card s0">
+    <div class="step-label">Phase 0 — Header Only</div>
+    <div class="step-num">0%</div>
+    <div class="step-unit">real user traffic</div>
+    <div class="traffic-bar"><div class="traffic-bar-fill"></div></div>
+    <p>Only traffic with<br><code>X-Canary: true</code> header<br>reaches new version</p>
+    <span class="pause-badge">⏸ pause: 5m · QA validates</span>
+  </div>
+  <div class="split-card s10">
+    <div class="step-label">Phase 1 — Canary</div>
+    <div class="step-num">10%</div>
+    <div class="step-unit">real user traffic</div>
+    <div class="traffic-bar"><div class="traffic-bar-fill"></div></div>
+    <p>10% of real users<br>hit canary pods<br>Analysis runs 10×30s</p>
+    <span class="pause-badge">⏸ pause: 2m → analysis</span>
+  </div>
+  <div class="split-card s25">
+    <div class="step-label">Phase 2 — Expand</div>
+    <div class="step-num">25%</div>
+    <div class="step-unit">real user traffic</div>
+    <div class="traffic-bar"><div class="traffic-bar-fill"></div></div>
+    <p>Quarter of traffic on<br>new version<br>Analysis continues</p>
+    <span class="pause-badge">⏸ pause: 5m → analysis</span>
+  </div>
+  <div class="split-card s50">
+    <div class="step-label">Phase 3 — Half</div>
+    <div class="step-num">50%</div>
+    <div class="step-unit">real user traffic</div>
+    <div class="traffic-bar"><div class="traffic-bar-fill"></div></div>
+    <p>Half traffic on canary<br>Manual gate required<br>before final promote</p>
+    <span class="pause-badge">⏸ pause: {} → manual promote</span>
+  </div>
+</div>
+
+<!-- ── Full Canary Flow ────────────────────────────────────────────────── -->
+<div class="section">
+  <div class="diagram-wrapper">
+    <div class="diagram-title">🔄 Canary Rollout Full Flow — API Service (Argo Rollouts)</div>
+    <div class="mermaid">
+flowchart TD
+    START(["🚀 CD Pipeline\nArgoCD sync triggered\nNew image tag pushed to GitOps"])
+
+    START --> ROLLOUT["Argo Rollouts\nDetects new image tag\nCreates Canary ReplicaSet"]
+
+    ROLLOUT --> STEP0["📌 Step 0: Header-Based\n0% real traffic\ncurl -H 'X-Canary: true' → canary pods\nQA team validates internally"]
+
+    STEP0 --> PAUSE0["⏸ Pause: 5 minutes\nQA validates UI / API"]
+    PAUSE0 --> PROMOTE_10["kubectl argo rollouts promote\napi-service -n prod"]
+
+    PROMOTE_10 --> STEP1["🟡 Step 1: 10% Traffic\nNginx canary-weight: 10\nStable: 90% · Canary: 10%"]
+
+    STEP1 --> ANALYSIS1{{"📊 AnalysisRun\n10 × 30s measurements"}}
+
+    subgraph METRICS["Prometheus Metrics Checked"]
+        M1["5xx error rate < 1%"]
+        M2["P99 latency < 500ms"]
+        M3["Pod restarts = 0"]
+        M4["Success rate > 99%"]
+        M5["CPU usage < 90%"]
+    end
+
+    ANALYSIS1 --> METRICS
+    METRICS --> GATE1{"All metrics\nwithin SLO?"}
+
+    GATE1 -->|"❌ Failed"| ABORT["🚨 Auto-Abort\nkubectl argo rollouts abort\nCanary pods → 0%\nStable pods → 100%\nGitOps revert + ArgoCD sync\nPagerDuty alert"]
+
+    GATE1 -->|"✅ Passed"| STEP2["🟠 Step 2: 25% Traffic\nNginx canary-weight: 25"]
+    STEP2 --> PAUSE2["⏸ Pause: 5 minutes"]
+    PAUSE2 --> ANALYSIS2{{"📊 AnalysisRun\n25% checkpoint"}}
+    ANALYSIS2 -->|"❌ Failed"| ABORT
+    ANALYSIS2 -->|"✅ Passed"| PROMOTE_25["CD Pipeline promotes\nkubectl argo rollouts promote"]
+
+    PROMOTE_25 --> STEP3["🔴 Step 3: 50% Traffic\nNginx canary-weight: 50"]
+    STEP3 --> PAUSE3["⏸ Pause: 5 minutes"]
+    PAUSE3 --> ANALYSIS3{{"📊 AnalysisRun\n50% checkpoint"}}
+    ANALYSIS3 -->|"❌ Failed"| ABORT
+    ANALYSIS3 -->|"✅ Passed"| SLACK_NOTIFY["📢 Slack notification\nCanary at 50% — metrics OK\nRequest final approval"]
+
+    SLACK_NOTIFY --> MANUAL_GATE["⏸ Manual Gate\npause: {} — empty pause\nAwaits: kubectl argo rollouts promote\nor GitHub Actions approval"]
+
+    MANUAL_GATE -->|"✅ Approve"| STEP4["✅ Step 4: 100% Traffic\nAll traffic to new version\nStable ReplicaSet updated\nOld pods scale down"]
+
+    MANUAL_GATE -->|"❌ Abort"| ABORT
+
+    STEP4 --> HEALTH_CHECK["❤️ Post-Deploy Health\ncurl /health all endpoints\nCloudWatch 5xx check"]
+
+    HEALTH_CHECK -->|"✅ Healthy"| SUCCESS["🎉 Canary Complete\nNew version = 100% stable\nGitOps commit retained\nRelease tagged"]
+
+    HEALTH_CHECK -->|"❌ Degraded"| ABORT
+
+    %% Styling
+    classDef success fill:#1c2e1c,stroke:#4ade80,color:#bbf7d0
+    classDef fail fill:#4c1d1d,stroke:#ef4444,color:#fecaca
+    classDef analysis fill:#1e3a5f,stroke:#3b82f6,color:#bfdbfe
+    classDef step fill:#3b2b00,stroke:#f59e0b,color:#fef3c7
+    classDef gate fill:#2d1f3a,stroke:#a855f7,color:#e9d5ff
+    classDef metrics fill:#1e293b,stroke:#64748b,color:#cbd5e1
+
+    class SUCCESS success
+    class ABORT fail
+    class ANALYSIS1,ANALYSIS2,ANALYSIS3 analysis
+    class STEP1,STEP2,STEP3,STEP4 step
+    class GATE1,MANUAL_GATE gate
+    class METRICS,M1,M2,M3,M4,M5 metrics
+    </div>
+  </div>
+</div>
+
+<!-- ── Traffic Split Architecture ─────────────────────────────────────── -->
+<div class="section">
+  <div class="diagram-wrapper">
+    <div class="diagram-title">🔀 Traffic Routing Architecture — Nginx Canary + Argo Rollouts</div>
+    <div class="mermaid">
+graph LR
+    subgraph USERS["👥 Users"]
+        U1["90% Normal Users"]
+        U2["10% Canary Users\n(random routing)"]
+        QA["🔬 QA Team\nX-Canary: true header"]
+    end
+
+    subgraph INGRESS["🌐 Nginx Ingress Controller"]
+        ING_STABLE["Stable Ingress\n(main route)"]
+        ING_CANARY["Canary Ingress\ncanary-weight: 10\ncanary-by-header: X-Canary"]
+    end
+
+    subgraph SERVICES["Kubernetes Services"]
+        SVC_STABLE["api-service-stable\n(ClusterIP)"]
+        SVC_CANARY["api-service-canary\n(ClusterIP)"]
+    end
+
+    subgraph PODS_STABLE["🟦 Stable ReplicaSet (v1.1.0)"]
+        P1["Pod 1\nv1.1.0"]
+        P2["Pod 2\nv1.1.0"]
+        P3["Pod 3\nv1.1.0"]
+    end
+
+    subgraph PODS_CANARY["🟡 Canary ReplicaSet (v1.2.0)"]
+        PC1["Canary Pod 1\nv1.2.0"]
+    end
+
+    U1 -->|"~90% traffic"| ING_STABLE
+    U2 -->|"~10% traffic"| ING_CANARY
+    QA -->|"100% → canary\n(header match)"| ING_CANARY
+
+    ING_STABLE --> SVC_STABLE
+    ING_CANARY --> SVC_CANARY
+
+    SVC_STABLE --> P1 & P2 & P3
+    SVC_CANARY --> PC1
+
+    style PODS_STABLE fill:#1e3a5f,stroke:#3b82f6,color:#bfdbfe
+    style PODS_CANARY fill:#3b2b00,stroke:#f59e0b,color:#fef3c7
+    style INGRESS fill:#1e293b,stroke:#64748b,color:#cbd5e1
+    style SERVICES fill:#1c2e1c,stroke:#4ade80,color:#bbf7d0
+    style USERS fill:#2d1f3a,stroke:#a855f7,color:#e9d5ff
+    </div>
+  </div>
+</div>
+
+<!-- ── Airflow Blue/Green ─────────────────────────────────────────────── -->
+<div class="section">
+  <div class="diagram-wrapper">
+    <div class="diagram-title">🔵🟢 Blue/Green Strategy — Airflow Scheduler (Stateful Service)</div>
+    <div class="mermaid">
+flowchart LR
+    subgraph BEFORE["Before Deploy — Blue Active"]
+        B_ACTIVE["🔵 Blue Scheduler\nv1.1.0 — ACTIVE\nProcessing DAGs"]
+        B_SVC["airflow-scheduler-active\n→ Blue pods"]
+    end
+
+    subgraph DURING["During Deploy — Preview Running"]
+        G_PREVIEW["🟢 Green Scheduler\nv1.2.0 — PREVIEW\n(not routing DAG tasks yet)"]
+        ANALYSIS["📊 PrePromotionAnalysis\nHealth checks on Green\nNo real traffic yet"]
+        B_STILL["🔵 Blue — Still ACTIVE\n100% DAG traffic\nFallback if Green fails"]
+    end
+
+    subgraph AFTER["After Promotion — Green Active"]
+        G_ACTIVE["🟢 Green Scheduler\nv1.2.0 — ACTIVE\n100% DAG tasks"]
+        B_DOWN["🔵 Blue — ScaleDown\nDeleted after 60s\n(scaleDownDelaySeconds)"]
+    end
+
+    BEFORE -->|"New image tag\nArgoCD sync"| DURING
+    ANALYSIS -->|"✅ Health OK\nkubectl argo rollouts promote"| AFTER
+    ANALYSIS -->|"❌ Health FAIL\nkubectl argo rollouts abort"| BEFORE
+
+    style BEFORE fill:#1e3a5f,stroke:#3b82f6,color:#bfdbfe
+    style DURING fill:#3b2b00,stroke:#f59e0b,color:#fef3c7
+    style AFTER fill:#1c2e1c,stroke:#4ade80,color:#bbf7d0
+    </div>
+  </div>
+</div>
+
+<!-- ── AnalysisRun Metrics ─────────────────────────────────────────────── -->
+<div class="metrics-grid">
+  <div class="metric-card">
+    <div class="metric-name">📉 HTTP 5xx Error Rate</div>
+    <div class="metric-threshold">&lt; 1%</div>
+    <div class="metric-desc">Measured every 30s × 10 times.<br><span>Fail limit: 1</span> — any breach aborts canary.</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-name">⚡ P99 Latency</div>
+    <div class="metric-threshold">&lt; 500ms</div>
+    <div class="metric-desc">histogram_quantile(0.99) from Prometheus.<br><span>Fail limit: 1</span> — latency regression detected.</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-name">🔄 Pod Restarts</div>
+    <div class="metric-threshold">= 0</div>
+    <div class="metric-desc">kube_pod_container_status_restarts_total.<br><span>Zero tolerance</span> — any restart = abort.</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-name">✅ HTTP Success Rate</div>
+    <div class="metric-threshold">&gt; 99%</div>
+    <div class="metric-desc">2xx + 3xx / total requests.<br><span>Fail limit: 1</span> across 10 measurements.</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-name">🖥️ CPU Utilization</div>
+    <div class="metric-threshold">&lt; 90%</div>
+    <div class="metric-desc">Canary pod average CPU usage.<br><span>Fail limit: 2</span> — some spikes tolerated.</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-name">🌍 Global Error Budget</div>
+    <div class="metric-threshold">&lt; 2%</div>
+    <div class="metric-desc">ClusterAnalysisTemplate — checks ALL prod services.<br><span>Zero tolerance</span> at cluster level.</div>
+  </div>
+</div>
+
+<!-- ── Quick Reference ─────────────────────────────────────────────────── -->
+<div class="diagram-wrapper">
+  <div class="diagram-title">⌨️ Argo Rollouts CLI Quick Reference</div>
+  <pre style="background:#0f172a;padding:20px;border-radius:8px;font-family:monospace;font-size:0.85rem;color:#94a3b8;overflow-x:auto;line-height:1.8">
+<span style="color:#60a5fa"># Watch rollout status in real-time</span>
+kubectl argo rollouts get rollout api-service -n prod --watch
+
+<span style="color:#60a5fa"># Check current step and analysis</span>
+kubectl argo rollouts get rollout api-service -n prod
+
+<span style="color:#60a5fa"># Promote to next step (advance past a pause)</span>
+kubectl argo rollouts promote api-service -n prod
+
+<span style="color:#60a5fa"># Skip all remaining steps → go straight to 100% (emergency)</span>
+kubectl argo rollouts promote api-service -n prod --full
+
+<span style="color:#60a5fa"># Abort canary → immediately restore 100% stable traffic</span>
+kubectl argo rollouts abort api-service -n prod
+
+<span style="color:#60a5fa"># Undo to previous stable revision</span>
+kubectl argo rollouts undo api-service -n prod
+
+<span style="color:#60a5fa"># Retry a failed rollout after fixing the issue</span>
+kubectl argo rollouts retry rollout api-service -n prod
+
+<span style="color:#60a5fa"># List all AnalysisRuns for a rollout</span>
+kubectl get analysisrun -n prod -l rollout-name=api-service
+
+<span style="color:#60a5fa"># Describe a specific AnalysisRun to see metric results</span>
+kubectl describe analysisrun &lt;name&gt; -n prod
+
+<span style="color:#60a5fa"># Watch via Argo Rollouts Dashboard (port-forward)</span>
+kubectl argo rollouts dashboard -n prod
+  </pre>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#1e3a5f',
+      primaryTextColor: '#e2e8f0',
+      primaryBorderColor: '#3b82f6',
+      lineColor: '#64748b',
+      secondaryColor: '#1e293b',
+      tertiaryColor: '#0f172a',
+      background: '#0f1117',
+      mainBkg: '#1a1d27',
+      clusterBkg: '#1e293b',
+      titleColor: '#f1f5f9',
+      fontFamily: 'Segoe UI, system-ui, sans-serif'
+    },
+    flowchart: { curve: 'basis', padding: 20, nodeSpacing: 40, rankSpacing: 50 },
+    securityLevel: 'loose'
+  });
+</script>
+</body>
+</html>

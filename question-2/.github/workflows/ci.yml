@@ -1,0 +1,415 @@
+name: CI — Build & Security Gates
+
+on:
+  pull_request:
+    branches:
+      - main
+      - "release/**"
+    paths-ignore:
+      - "**.md"
+      - ".github/CODEOWNERS"
+      - "docs/**"
+
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  security-events: write   
+  pull-requests: write     
+  packages: write         
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-southeast-1.amazonaws.com
+  IMAGE_NAME: example/webapp
+  GO_VERSION: "1.21"
+  NODE_VERSION: "20"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+ 
+  secret-scan:
+    name: 🔐 Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   
+
+      - name: Run TruffleHog (detect secrets in git history)
+        uses: trufflesecurity/trufflehog@v3.63.0
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          extra_args: --fail --json
+
+      - name: Run Gitleaks (detect secrets in code)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  lint:
+    name: ✅ Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Lint Frontend (ESLint + Prettier)
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run format:check
+
+      - name: Lint API (Ruff + Black + isort)
+        working-directory: api
+        run: |
+          pip install ruff black isort
+          ruff check . --output-format=github
+          black --check .
+          isort --check-only .
+
+      - name: Lint Airflow DAGs
+        working-directory: airflow
+        run: |
+          pip install apache-airflow ruff
+          python -m py_compile dags/**/*.py
+          ruff check dags/
+
+      - name: Validate Helm charts
+        run: |
+          helm lint charts/frontend/
+          helm lint charts/api/
+          helm lint charts/airflow/
+
+      - name: Validate Kubernetes manifests
+        run: |
+          kubectl --dry-run=client apply -f k8s/ --recursive 2>/dev/null || \
+          echo "kubectl not configured — validating with kubeconform..."
+          pip install kubeconform || true
+          find k8s/ -name "*.yaml" | xargs kubeconform -summary || true
+
+  unit-tests:
+    name: 🧪 Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Run Frontend Tests
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run test:coverage -- --reporter=github-actions
+        env:
+          CI: true
+
+      - name: Run API Tests
+        working-directory: api
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt
+          pytest tests/unit/ \
+            --cov=. \
+            --cov-report=xml \
+            --cov-fail-under=80 \
+            --junitxml=test-results.xml \
+            -v
+
+      - name: Run Airflow DAG Tests
+        working-directory: airflow
+        run: |
+          pip install apache-airflow pytest
+          pytest tests/dags/ -v
+
+      - name: Upload coverage to GitHub
+        uses: codecov/codecov-action@v4
+        with:
+          files: api/coverage.xml,frontend/coverage/lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  sast:
+    name: 🔒 SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   
+
+      - name: Get changed files
+        id: changed
+        run: |
+          echo "files=$(git diff --name-only HEAD~1 | grep -E '\.(py|js|ts|tsx|jsx)$' | tr '\n' ' ')" >> $GITHUB_OUTPUT
+
+      - name: Run Semgrep SAST
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/owasp-top-ten
+            p/python
+            p/javascript
+          generateSarif: "1"
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+      - name: Upload Semgrep SARIF to GitHub
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+        if: always()
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python, javascript
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python,javascript"
+
+  sca:
+    name: 📦 SCA — Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan (dependencies + IaC)
+        uses: aquasecurity/trivy-action@0.16.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          format: sarif
+          output: trivy-fs.sarif
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+        if: always()
+
+      - name: Dependency Review (GitHub Action)
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          license-check: true
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
+        if: github.event_name == 'pull_request'
+
+  iac-scan:
+    name: 🏗️ IaC Security Scan
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'pull_request' &&
+      (contains(join(github.event.pull_request.files.*.filename, ','), 'terraform/') ||
+       contains(join(github.event.pull_request.files.*.filename, ','), 'k8s/') ||
+       contains(join(github.event.pull_request.files.*.filename, ','), 'charts/'))
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkov — Terraform + K8s + Helm scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          framework: terraform,kubernetes,helm
+          hard_fail_on: HIGH,CRITICAL
+          output_format: cli,sarif
+          output_file_path: console,checkov.sarif
+
+      - name: Upload Checkov SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov.sarif
+        if: always()
+
+  build-and-scan:
+    name: 🐳 Build & Container Scan
+    runs-on: ubuntu-latest
+    needs: [secret-scan, lint, unit-tests, sast, sca]  
+    strategy:
+      matrix:
+        service: [frontend, api, airflow]
+    outputs:
+      image-digest-frontend: ${{ steps.build.outputs.digest }}
+      image-digest-api: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: github-actions-ci
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.service }}/
+          file: ${{ matrix.service }}/Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_SHA=${{ github.sha }}
+            VERSION=${{ github.ref_name }}
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.16.1
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          format: sarif
+          output: trivy-image-${{ matrix.service }}.sarif
+          cache-dir: ~/.cache/trivy
+
+      - name: Upload image scan SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image-${{ matrix.service }}.sarif
+        if: always()
+
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0.15.0
+        with:
+          image: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:${{ github.sha }}
+          format: spdx-json
+          artifact-name: sbom-${{ matrix.service }}-${{ github.sha }}.spdx.json
+
+      - name: Push image to ECR (on merge to main only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:${{ github.sha }}
+          # Also tag as 'latest' and environment tag
+          docker tag \
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:${{ github.sha }} \
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:latest
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:latest
+
+  sign-and-attest:
+    name: ✍️ Sign Image + SLSA Provenance
+    runs-on: ubuntu-latest
+    needs: [build-and-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      id-token: write    
+      packages: write
+      contents: read
+    strategy:
+      matrix:
+        service: [frontend, api, airflow]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Sign image with Cosign (keyless — Sigstore)
+        run: |
+          IMAGE="${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:${{ github.sha }}"
+          cosign sign --yes "${IMAGE}"
+          echo "✅ Image signed: ${IMAGE}"
+
+      - name: Attach SBOM attestation
+        run: |
+          cosign attest --yes \
+            --type spdxjson \
+            --predicate sbom-${{ matrix.service }}-${{ github.sha }}.spdx.json \
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:${{ github.sha }}
+        continue-on-error: true
+
+  pr-summary:
+    name: 📝 PR Summary
+    runs-on: ubuntu-latest
+    needs: [secret-scan, lint, unit-tests, sast, sca, build-and-scan]
+    if: always() && github.event_name == 'pull_request'
+    steps:
+      - name: Comment CI results on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const jobs = {
+              'Secret Scan': '${{ needs.secret-scan.result }}',
+              'Lint': '${{ needs.lint.result }}',
+              'Unit Tests': '${{ needs.unit-tests.result }}',
+              'SAST': '${{ needs.sast.result }}',
+              'SCA': '${{ needs.sca.result }}',
+              'Build & Scan': '${{ needs.build-and-scan.result }}'
+            };
+            const icon = (r) => r === 'success' ? '✅' : r === 'skipped' ? '⏭️' : '❌';
+            const rows = Object.entries(jobs).map(([k,v]) => `| ${icon(v)} | ${k} | ${v} |`).join('\n');
+            const allPass = Object.values(jobs).every(v => v === 'success' || v === 'skipped');
+            const body = `## CI Pipeline Results ${allPass ? '✅ All Passed' : '❌ Some Failed'}
+
+            | Status | Job | Result |
+            |--------|-----|--------|
+            ${rows}
+
+            > Commit: \`${{ github.sha }}\` | Branch: \`${{ github.head_ref }}\`
+            `;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });

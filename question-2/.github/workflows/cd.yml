@@ -1,0 +1,408 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: ["CI — Build & Security Gates"]
+    types: [completed]
+    branches: [main]
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+      image_tag:
+        description: "Image tag (SHA or semver)"
+        required: true
+        type: string
+      service:
+        description: "Service to deploy"
+        required: false
+        default: all
+        type: choice
+        options: [all, frontend, api, airflow]
+
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  id-token: write
+  deployments: write
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-southeast-1.amazonaws.com
+  GITOPS_REPO: coraline/gitops-helm-values
+  SERVICES: frontend api airflow
+
+jobs:
+  deploy-dev:
+    name: Deploy → Dev
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+      url: https://dev.internal.coraline.example.com
+    if: |
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN_DEV }}
+          role-session-name: github-actions-cd-dev
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_PAT }}
+          path: gitops
+
+      - name: Update image tags (dev)
+        run: |
+          for SERVICE in $SERVICES; do
+            FILE="gitops/environments/dev/values-${SERVICE}.yaml"
+            [ -f "$FILE" ] && yq e ".image.tag = \"${{ steps.tag.outputs.tag }}\"" -i "$FILE"
+          done
+
+      - name: Push to GitOps repo
+        working-directory: gitops
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add environments/dev/
+          git diff --staged --quiet && exit 0
+          git commit -m "deploy(dev): ${{ steps.tag.outputs.tag }}"
+          git push
+
+      - name: Sync ArgoCD
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN }}" \
+            "${{ secrets.ARGOCD_URL }}/api/v1/applications/coraline-dev/sync" \
+            -d '{"prune":true}' || true
+
+      - name: Wait for rollout
+        run: sleep 120
+
+      - name: Smoke test
+        id: smoke
+        run: |
+          curl -sf https://dev.internal.coraline.example.com/health || exit 1
+          curl -sf https://dev-api.internal.coraline.example.com/api/v1/health | grep -q '"status":"ok"' || exit 1
+
+      - name: Notify
+        if: always()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {"text": "${{ steps.smoke.outcome == 'success' && '✅' || '❌' }} *Dev deploy*: `${{ steps.tag.outputs.tag }}` by ${{ github.actor }}"}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  deploy-staging:
+    name: Deploy → Staging
+    runs-on: ubuntu-latest
+    needs: [deploy-dev]
+    environment:
+      name: staging
+      url: https://staging.internal.coraline.example.com
+    if: |
+      needs.deploy-dev.result == 'success' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN_STAGING }}
+          role-session-name: github-actions-cd-staging
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_PAT }}
+          path: gitops
+
+      - name: Update image tags (staging)
+        run: |
+          for SERVICE in $SERVICES; do
+            FILE="gitops/environments/staging/values-${SERVICE}.yaml"
+            [ -f "$FILE" ] && yq e ".image.tag = \"${{ steps.tag.outputs.tag }}\"" -i "$FILE"
+          done
+
+      - name: Push to GitOps repo
+        working-directory: gitops
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add environments/staging/
+          git diff --staged --quiet && exit 0
+          git commit -m "deploy(staging): ${{ steps.tag.outputs.tag }}"
+          git push
+
+      - name: Sync ArgoCD
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN }}" \
+            "${{ secrets.ARGOCD_URL }}/api/v1/applications/coraline-staging/sync" \
+            -d '{"prune":true}' || true
+
+      - name: Wait for rollout
+        run: sleep 180
+
+      - name: Integration tests
+        id: integration
+        run: |
+          pip install pytest requests -q
+          pytest tests/integration/ \
+            --base-url="https://staging-api.internal.coraline.example.com" \
+            -v --timeout=60
+
+      - name: Notify
+        if: always()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {"text": "${{ steps.integration.outcome == 'success' && '✅' || '❌' }} *Staging deploy*: `${{ steps.tag.outputs.tag }}` — integration tests ${{ steps.integration.outcome }}"}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  deploy-prod:
+    name: Deploy → Production (Canary)
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    environment:
+      name: prod
+      url: https://app.coraline.example.com
+    if: |
+      needs.deploy-staging.result == 'success' ||
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN_PROD }}
+          role-session-name: github-actions-cd-prod
+
+      - name: Install kubectl + argo rollouts plugin
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          curl -LO "https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64"
+          chmod +x kubectl kubectl-argo-rollouts-linux-amd64
+          sudo mv kubectl /usr/local/bin/kubectl
+          sudo mv kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --name coraline-prod-eks \
+            --region ${{ env.AWS_REGION }} \
+            --role-arn ${{ secrets.AWS_DEPLOY_ROLE_ARN_PROD }}
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" == "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_PAT }}
+          path: gitops
+
+      - name: Record previous tag for rollback
+        run: |
+          PREV=$(yq e ".image.tag" gitops/environments/prod/values-api.yaml)
+          echo "PREV_TAG=${PREV}" >> $GITHUB_ENV
+
+      - name: Update image tags (prod)
+        run: |
+          for SERVICE in $SERVICES; do
+            FILE="gitops/environments/prod/values-${SERVICE}.yaml"
+            [ -f "$FILE" ] && yq e ".image.tag = \"${{ steps.tag.outputs.tag }}\"" -i "$FILE"
+          done
+
+      - name: Push to GitOps repo
+        working-directory: gitops
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add environments/prod/
+          git commit -m "deploy(prod): ${{ steps.tag.outputs.tag }}
+
+          Approved by: ${{ github.actor }}
+          Previous: ${{ env.PREV_TAG }}"
+          git push
+
+      - name: Trigger ArgoCD sync → canary starts at 10%
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN }}" \
+            "${{ secrets.ARGOCD_URL }}/api/v1/applications/coraline-prod/sync" \
+            -d '{"prune":true}' || true
+
+      - name: Watch canary at 10%
+        id: canary-10
+        run: |
+          TIMEOUT=300
+          ELAPSED=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            PHASE=$(kubectl argo rollouts get rollout api-service -n prod -o json \
+              | jq -r '.status.phase // "Progressing"')
+            STEP=$(kubectl argo rollouts get rollout api-service -n prod -o json \
+              | jq -r '.status.currentStepIndex // 0')
+            echo "phase=${PHASE} step=${STEP} elapsed=${ELAPSED}s"
+
+            [ "${PHASE}" == "Degraded" ] && exit 1
+            [ "${PHASE}" == "Paused" ] && [ "${STEP}" -ge 1 ] && break
+
+            sleep 15
+            ELAPSED=$((ELAPSED + 15))
+          done
+
+      - name: Check AnalysisRun at 10%
+        run: |
+          sleep 30
+          PHASE=$(kubectl get analysisrun -n prod -l rollout-name=api-service \
+            --sort-by=.metadata.creationTimestamp -o json \
+            | jq -r '.items[-1].status.phase // "Pending"')
+          echo "AnalysisRun at 10%: ${PHASE}"
+          [ "${PHASE}" == "Failed" ] && exit 1 || true
+
+      - name: Promote → 25%
+        run: |
+          kubectl argo rollouts promote api-service -n prod
+          kubectl argo rollouts promote frontend -n prod
+          echo "Waiting 5m for analysis at 25%..."
+          sleep 300
+          PHASE=$(kubectl get analysisrun -n prod -l rollout-name=api-service \
+            --sort-by=.metadata.creationTimestamp -o json \
+            | jq -r '.items[-1].status.phase // "Pending"')
+          echo "AnalysisRun at 25%: ${PHASE}"
+          [ "${PHASE}" == "Failed" ] && exit 1 || true
+
+      - name: Promote → 50%
+        run: |
+          kubectl argo rollouts promote api-service -n prod
+          kubectl argo rollouts promote frontend -n prod
+          echo "Waiting 5m for analysis at 50%..."
+          sleep 300
+          PHASE=$(kubectl get analysisrun -n prod -l rollout-name=api-service \
+            --sort-by=.metadata.creationTimestamp -o json \
+            | jq -r '.items[-1].status.phase // "Pending"')
+          echo "AnalysisRun at 50%: ${PHASE}"
+          [ "${PHASE}" == "Failed" ] && exit 1 || true
+
+      - name: Notify Slack — 50% checkpoint
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {"text": "🐤 *Canary at 50%* — metrics OK\nTag: `${{ steps.tag.outputs.tag }}` | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Approve full rollout>"}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Promote → 100%
+        run: |
+          kubectl argo rollouts promote api-service -n prod
+          kubectl argo rollouts promote frontend -n prod
+          kubectl argo rollouts promote airflow-webserver -n prod
+          kubectl argo rollouts promote airflow-scheduler -n prod
+
+          kubectl argo rollouts status api-service -n prod --timeout=5m
+          kubectl argo rollouts status frontend -n prod --timeout=5m
+          kubectl argo rollouts status airflow-webserver -n prod --timeout=5m
+
+      - name: Post-deploy health check
+        id: health
+        run: |
+          sleep 60
+          FAIL=0
+          for URL in \
+            https://app.coraline.example.com/health \
+            https://api.coraline.example.com/api/v1/health \
+            https://airflow.coraline.example.com/health; do
+            curl -sf --max-time 10 "$URL" && echo "✅ $URL" || { echo "❌ $URL"; FAIL=1; }
+          done
+
+          ERROR_COUNT=$(aws cloudwatch get-metric-statistics \
+            --namespace AWS/ApplicationELB \
+            --metric-name HTTPCode_ELB_5XX_Count \
+            --dimensions Name=LoadBalancer,Value=${{ secrets.PROD_ALB_NAME }} \
+            --start-time "$(date -u -d '-5 minutes' +%Y-%m-%dT%H:%M:%SZ)" \
+            --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --period 300 --statistics Sum \
+            --query 'Datapoints[0].Sum' --output text 2>/dev/null || echo "0")
+
+          echo "5xx count (last 5m): ${ERROR_COUNT}"
+          [ "${ERROR_COUNT}" -gt 20 ] 2>/dev/null && FAIL=1
+
+          exit $FAIL
+
+      - name: Abort canary on failure
+        if: failure()
+        run: |
+          echo "Aborting canary — restoring stable traffic"
+          kubectl argo rollouts abort api-service -n prod || true
+          kubectl argo rollouts abort frontend -n prod || true
+          kubectl argo rollouts abort airflow-webserver -n prod || true
+          kubectl argo rollouts abort airflow-scheduler -n prod || true
+
+          cd gitops
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git revert HEAD --no-edit
+          git push
+
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN }}" \
+            "${{ secrets.ARGOCD_URL }}/api/v1/applications/coraline-prod/sync" \
+            -d '{"prune":true}' || true
+
+      - name: Notify result
+        if: always()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {"text": "${{ job.status == 'success' && '✅' || '🚨' }} *Production ${{ job.status == 'success' && 'deployed' || 'FAILED — rollback triggered' }}*\nTag: `${{ steps.tag.outputs.tag }}` | By: ${{ github.actor }}"}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

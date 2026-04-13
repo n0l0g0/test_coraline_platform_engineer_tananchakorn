@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Q2 — CI/CD Pipeline Flow</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.6.1/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 32px 24px;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    header h1 { font-size: 1.8rem; font-weight: 700; color: #60a5fa; }
+    header p { margin-top: 8px; color: #94a3b8; font-size: 0.95rem; }
+    .badge {
+      display: inline-block;
+      background: #1e3a5f;
+      color: #93c5fd;
+      border: 1px solid #2563eb;
+      border-radius: 20px;
+      padding: 3px 12px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      margin: 4px;
+    }
+    .section { margin-bottom: 32px; }
+    .diagram-wrapper {
+      background: #1a1d27;
+      border: 1px solid #2d3748;
+      border-radius: 16px;
+      padding: 28px;
+      overflow-x: auto;
+      margin-bottom: 24px;
+    }
+    .diagram-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: #f1f5f9;
+      margin-bottom: 20px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #2d3748;
+    }
+    .pipeline-steps {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-top: 24px;
+    }
+    .step-card {
+      background: #1a1d27;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .step-card .step-num {
+      display: inline-block;
+      background: #1e3a5f;
+      color: #60a5fa;
+      border-radius: 50%;
+      width: 28px; height: 28px;
+      line-height: 28px;
+      text-align: center;
+      font-weight: 700;
+      font-size: 0.85rem;
+      margin-bottom: 8px;
+    }
+    .step-card h4 { font-size: 0.9rem; color: #f1f5f9; margin-bottom: 6px; }
+    .step-card ul { list-style: none; font-size: 0.82rem; color: #94a3b8; line-height: 1.7; }
+    .step-card ul li::before { content: "✓ "; color: #4ade80; }
+    .step-card.warn ul li::before { content: "⚡ "; color: #f59e0b; }
+    .step-card.danger ul li::before { content: "⚠ "; color: #ef4444; }
+    .mermaid { display: flex; justify-content: center; }
+    .mermaid svg { max-width: 100% !important; height: auto !important; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🔄 Question 2 — CI/CD Pipeline Flow</h1>
+  <p>GitHub Actions · ArgoCD · Multi-Environment Promotion · Zero-Downtime Deployments</p>
+  <br/>
+  <span class="badge">🔍 SAST Semgrep</span>
+  <span class="badge">📦 SCA Trivy</span>
+  <span class="badge">🔐 Secrets Scan</span>
+  <span class="badge">🐳 Docker Build</span>
+  <span class="badge">📋 SBOM</span>
+  <span class="badge">✍️ Cosign Sign</span>
+  <span class="badge">☸️ Helm/ArgoCD</span>
+</header>
+
+<!-- ── Full CI/CD Pipeline Flow ───────────────────────────────────────── -->
+<div class="diagram-wrapper">
+  <div class="diagram-title">🔄 Complete CI/CD Pipeline — From Code Commit to Production</div>
+  <div class="mermaid">
+flowchart TD
+    DEV(["👨‍💻 Developer\nLocal Development"])
+
+    DEV -->|"git push feature/branch"| PR["📝 Pull Request\nOpened on GitHub"]
+
+    PR --> CI_TRIGGER["⚡ GitHub Actions\nCI Triggered"]
+
+    subgraph CI["🔍 CI Pipeline — Runs on Every PR  (parallel jobs)"]
+        direction TB
+        subgraph PARALLEL1["Parallel Stage 1"]
+            LINT["✅ Lint & Format\nESLint · Prettier\nBlack · isort"]
+            SECRET_SCAN["🔐 Secret Scan\nGitleaks / TruffleHog\nBlock if secrets found"]
+        end
+
+        subgraph PARALLEL2["Parallel Stage 2"]
+            UNIT_TEST["🧪 Unit Tests\n+ Coverage Report\n≥ 80% threshold"]
+            SAST["🔒 SAST\nSemgrep (p/security-audit)\nCodeQL (GitHub Advanced)"]
+            SCA["📦 SCA\nTrivy fs · Snyk\nBlock on CRITICAL CVEs"]
+        end
+
+        subgraph BUILD_STAGE["Build Stage — after all checks pass"]
+            BUILD["🐳 Docker Build\nMulti-stage · Distroless\ncache from GHA"]
+            IMG_SCAN["🔍 Container Scan\nTrivy image\nCRITICAL,HIGH → block"]
+            SBOM_GEN["📋 SBOM Generate\nSyft (SPDX-JSON)\nAttach to release"]
+        end
+    end
+
+    CI_TRIGGER --> PARALLEL1 & PARALLEL2
+    PARALLEL1 --> BUILD_STAGE
+    PARALLEL2 --> BUILD_STAGE
+    BUILD --> IMG_SCAN --> SBOM_GEN
+
+    SBOM_GEN --> GATE{"🚦 Security Gate\nAll checks passed?"}
+
+    GATE -->|"❌ Failed"| BLOCK["🚫 Block PR Merge\nAnnotate PR with\nfailure details\nNotify developer"]
+    GATE -->|"✅ Passed"| REVIEW["👥 Code Review\n≥ 1 Approver required\nGitHub Branch Protection"]
+
+    REVIEW -->|"Approved + Merge\nto main branch"| PUSH_ECR["📤 Push to ECR\nImage tagged with:\n• SHA digest\n• environment tag\n• semver (on release)"]
+
+    PUSH_ECR --> SIGN["✍️ Sign Image\nCosign (keyless)\nSigstore / Rekor\nProvenance SLSA L2"]
+
+    SIGN --> DEPLOY_DEV["🟢 Deploy → Dev\nArgoCD GitOps sync\nHelm chart update\nimage.tag = SHA"]
+
+    subgraph DEV_PHASE["🟢 Dev Phase"]
+        DEPLOY_DEV --> DEV_HEALTH["❤️ Health Check\nK8s Readiness probe\nWait 2 min"]
+        DEV_HEALTH --> SMOKE_DEV["💨 Smoke Tests\ncurl /health endpoints\nBasic API validation"]
+    end
+
+    SMOKE_DEV -->|"✅ All passed"| PROMOTE_STG{"🟡 Auto-Promote\nto Staging?"}
+
+    PROMOTE_STG -->|"✅ Yes (auto)"| DEPLOY_STG["🟡 Deploy → Staging\nArgoCD sync\nHelm values.staging.yaml"]
+
+    subgraph STG_PHASE["🟡 Staging Phase"]
+        DEPLOY_STG --> STG_HEALTH["❤️ Health Check"]
+        STG_HEALTH --> INT_TEST["🧪 Integration Tests\nFull API test suite\nE2E (Playwright/Cypress)"]
+        INT_TEST --> PERF_TEST["📊 Performance Test\nk6 load test\nLatency SLO check"]
+    end
+
+    PERF_TEST -->|"✅ All passed"| APPROVAL{"👤 Manual Approval\nRequired for PROD"}
+
+    APPROVAL -->|"⏳ Awaiting"| SLACK_NOTIFY["📢 Slack Notification\nRequest approval\nDiff summary + metrics"]
+    SLACK_NOTIFY --> APPROVAL
+    APPROVAL -->|"❌ Rejected"| ROLLBACK_STG["↩️ Keep Staging\nas-is\nCreate issue"]
+    APPROVAL -->|"✅ Approved\nby Tech Lead / PO"| DEPLOY_PROD["🔴 Deploy → Production"]
+
+    subgraph PROD_PHASE["🔴 Production Phase — Zero Downtime"]
+        DEPLOY_PROD --> STRATEGY{"Deploy Strategy"}
+        STRATEGY -->|"Standard"| BG["🔵🟢 Blue/Green\nArgoCD Rollouts\nInstant cutover"]
+        STRATEGY -->|"High Risk"| CANARY["🐤 Canary\n10% → 25% → 100%\nAuto analyze metrics"]
+        BG & CANARY --> PROD_VERIFY["✅ Production\nVerification\n• Health checks\n• Error rate < 1%\n• Latency P99 < 500ms"]
+    end
+
+    PROD_VERIFY -->|"✅ Healthy"| SUCCESS["🎉 Release Complete\nTag Git release\nUpdate changelog\nNotify team"]
+    PROD_VERIFY -->|"❌ Degraded"| AUTO_RB["🚨 Auto Rollback\n< 5 minutes\nAlert: PagerDuty\nNotify: Slack"]
+
+    %% Styling
+    classDef devNode fill:#1e3a5f,stroke:#3b82f6,color:#bfdbfe
+    classDef stgNode fill:#3b2b00,stroke:#f59e0b,color:#fef3c7
+    classDef prodNode fill:#1c2e1c,stroke:#4ade80,color:#bbf7d0
+    classDef failNode fill:#4c1d1d,stroke:#ef4444,color:#fecaca
+    classDef successNode fill:#1c3a1c,stroke:#22c55e,color:#bbf7d0
+    classDef secNode fill:#2d1f3a,stroke:#a855f7,color:#e9d5ff
+    classDef gateNode fill:#1e293b,stroke:#64748b,color:#f1f5f9
+
+    class DEPLOY_DEV,DEV_HEALTH,SMOKE_DEV devNode
+    class DEPLOY_STG,STG_HEALTH,INT_TEST,PERF_TEST,PROMOTE_STG stgNode
+    class DEPLOY_PROD,PROD_PHASE,STRATEGY,BG,CANARY,PROD_VERIFY prodNode
+    class BLOCK,ROLLBACK_STG,AUTO_RB failNode
+    class SUCCESS successNode
+    class SECRET_SCAN,SAST,SCA,IMG_SCAN,SIGN secNode
+    class GATE,APPROVAL gateNode
+  </div>
+</div>
+
+<!-- ── Trunk Based Development Strategy ──────────────────────────────── -->
+<div class="diagram-wrapper">
+  <div class="diagram-title">🌿 Branching Strategy — Trunk-Based Development</div>
+  <div class="mermaid">
+gitGraph
+    commit id: "initial"
+    branch feature/api-endpoint
+    checkout feature/api-endpoint
+    commit id: "add POST /users"
+    commit id: "add unit tests"
+    checkout main
+    merge feature/api-endpoint id: "PR merge → CI passes" tag: "deploy:dev"
+
+    branch feature/airflow-dag
+    checkout feature/airflow-dag
+    commit id: "add ETL DAG"
+    commit id: "add DAG tests"
+    checkout main
+    merge feature/airflow-dag id: "PR merge → CI passes" tag: "deploy:dev v2"
+
+    branch release/v1.2.0
+    checkout release/v1.2.0
+    commit id: "bump version" tag: "v1.2.0"
+    checkout main
+    merge release/v1.2.0 id: "release → staging → prod"
+
+    branch hotfix/fix-auth-bug
+    checkout hotfix/fix-auth-bug
+    commit id: "fix JWT validation"
+    checkout main
+    merge hotfix/fix-auth-bug id: "hotfix → fast-track prod" tag: "v1.2.1"
+  </div>
+</div>
+
+<!-- ── Rollback Strategy ───────────────────────────────────────────────── -->
+<div class="diagram-wrapper">
+  <div class="diagram-title">↩️ Rollback & Incident Response Strategy</div>
+  <div class="mermaid">
+flowchart LR
+    subgraph DETECT["🔍 Detection"]
+        PROM_ALERT["Prometheus Alert\nError rate > 1%\nLatency P99 > 500ms"]
+        HEALTH_FAIL["Health Check\nFailed (3/5)"]
+        ON_CALL["On-Call Alert\nPagerDuty"]
+    end
+
+    subgraph RESPOND["⚡ Auto-Response (< 5 min)"]
+        ARGOCD_RB["ArgoCD Rollout\nUndo / Rollback\nPrevious stable image"]
+        K8S_RB["K8s Deployment\nRollback to\nlast known good"]
+    end
+
+    subgraph MANUAL["👤 Manual Options"]
+        HELM_RB["helm rollback\n<release> <revision>"]
+        IMG_PIN["Pin old image tag\nin GitOps repo\nPR → fast-track merge"]
+        DB_RB["DB Migration\nRollback script\n(if schema change)"]
+    end
+
+    subgraph POSTMORTEM["📋 Post-Incident"]
+        TIMELINE["Incident Timeline\ndocumentation"]
+        RCA["Root Cause Analysis\nBlameless postmortem"]
+        ACTION["Action Items\nTracked in Jira"]
+    end
+
+    PROM_ALERT & HEALTH_FAIL --> ON_CALL
+    ON_CALL --> ARGOCD_RB & K8S_RB
+    ARGOCD_RB & K8S_RB -->|"if auto fails"| MANUAL
+    MANUAL --> POSTMORTEM
+
+    style DETECT fill:#4c1d1d,stroke:#ef4444,color:#fecaca
+    style RESPOND fill:#1e3a5f,stroke:#3b82f6,color:#bfdbfe
+    style MANUAL fill:#3b2b00,stroke:#f59e0b,color:#fef3c7
+    style POSTMORTEM fill:#1e293b,stroke:#64748b,color:#cbd5e1
+  </div>
+</div>
+
+<!-- ── Pipeline Step Details ──────────────────────────────────────────── -->
+<div class="pipeline-steps">
+  <div class="step-card">
+    <div class="step-num">1</div>
+    <h4>🔐 Secret Scanning</h4>
+    <ul>
+      <li>Gitleaks — scan git history</li>
+      <li>TruffleHog — high entropy strings</li>
+      <li>Pre-commit hook (local)</li>
+      <li>Blocks merge on any finding</li>
+    </ul>
+  </div>
+  <div class="step-card">
+    <div class="step-num">2</div>
+    <h4>🔒 SAST</h4>
+    <ul>
+      <li>Semgrep (p/security-audit)</li>
+      <li>CodeQL (GitHub Advanced Security)</li>
+      <li>Scan only changed files (incremental)</li>
+      <li>Upload SARIF to GitHub Security tab</li>
+    </ul>
+  </div>
+  <div class="step-card">
+    <div class="step-num">3</div>
+    <h4>📦 SCA</h4>
+    <ul>
+      <li>Trivy filesystem scan</li>
+      <li>Snyk for dependency audit</li>
+      <li>License compliance check</li>
+      <li>CRITICAL CVE → block merge</li>
+    </ul>
+  </div>
+  <div class="step-card">
+    <div class="step-num">4</div>
+    <h4>🐳 Build & Scan</h4>
+    <ul>
+      <li>Docker multi-stage build</li>
+      <li>Distroless base image</li>
+      <li>Trivy image scan</li>
+      <li>Layer cache via GHA cache</li>
+    </ul>
+  </div>
+  <div class="step-card">
+    <div class="step-num">5</div>
+    <h4>📋 SBOM + Sign</h4>
+    <ul>
+      <li>Syft generates SPDX-JSON SBOM</li>
+      <li>Cosign signs image (keyless)</li>
+      <li>Provenance attestation (SLSA L2)</li>
+      <li>Stored in Rekor transparency log</li>
+    </ul>
+  </div>
+  <div class="step-card warn">
+    <div class="step-num">6</div>
+    <h4>🟢 Deploy Dev</h4>
+    <ul>
+      <li>ArgoCD GitOps sync</li>
+      <li>Helm chart + values.dev.yaml</li>
+      <li>Kyverno verifies image signature</li>
+      <li>Smoke test via GitHub Actions</li>
+    </ul>
+  </div>
+  <div class="step-card warn">
+    <div class="step-num">7</div>
+    <h4>🟡 Staging Tests</h4>
+    <ul>
+      <li>Full integration test suite</li>
+      <li>E2E tests (Playwright)</li>
+      <li>k6 load test (SLO verification)</li>
+      <li>Auto-promoted from dev</li>
+    </ul>
+  </div>
+  <div class="step-card">
+    <div class="step-num">8</div>
+    <h4>🔴 Production Deploy</h4>
+    <ul>
+      <li>Manual approval required</li>
+      <li>Blue/Green or Canary strategy</li>
+      <li>Auto-rollback on health failure</li>
+      <li>PagerDuty alert on degradation</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#1e3a5f',
+      primaryTextColor: '#e2e8f0',
+      primaryBorderColor: '#3b82f6',
+      lineColor: '#64748b',
+      secondaryColor: '#1e293b',
+      tertiaryColor: '#0f172a',
+      background: '#0f1117',
+      mainBkg: '#1a1d27',
+      clusterBkg: '#1e293b',
+      titleColor: '#f1f5f9',
+      fontFamily: 'Segoe UI, system-ui, sans-serif',
+      git0: '#3b82f6',
+      git1: '#10b981',
+      git2: '#f59e0b',
+      git3: '#ef4444',
+      gitBranchLabel0: '#e2e8f0',
+      gitBranchLabel1: '#e2e8f0',
+      gitInv0: '#1e3a5f',
+    },
+    flowchart: { curve: 'basis', padding: 20, nodeSpacing: 40, rankSpacing: 50 },
+    gitGraph: { rotateCommitLabel: false },
+    securityLevel: 'loose'
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,351 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: airflow-webserver
+  namespace: prod
+  labels:
+    app: airflow
+    component: webserver
+  annotations:
+    notifications.argoproj.io/subscribe.on-rollout-step-completed.slack: platform-releases
+    notifications.argoproj.io/subscribe.on-rollout-aborted.pagerduty: oncall
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+
+  selector:
+    matchLabels:
+      app: airflow
+      component: webserver
+
+  template:
+    metadata:
+      labels:
+        app: airflow
+        component: webserver
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: airflow-sa
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 50000
+        fsGroup: 50000
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: airflow-webserver
+          image: 123456789.dkr.ecr.ap-southeast-1.amazonaws.com/coraline/webapp-airflow:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          args: ["webserver"]
+          ports:
+            - containerPort: 8080
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 5
+            timeoutSeconds: 10
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          envFrom:
+            - configMapRef:
+                name: airflow-config-prod
+
+          env:
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-db-credentials
+                  key: connection_string
+            - name: AIRFLOW__CELERY__BROKER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-redis-credentials
+                  key: broker_url
+            - name: AIRFLOW__CORE__FERNET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-secrets
+                  key: fernet_key
+
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+              readOnly: true
+            - name: logs
+              mountPath: /opt/airflow/logs
+
+      volumes:
+        - name: dags
+          persistentVolumeClaim:
+            claimName: airflow-dags-pvc
+            readOnly: true
+        - name: logs
+          persistentVolumeClaim:
+            claimName: airflow-logs-pvc
+
+  strategy:
+    canary:
+      canaryService: airflow-webserver-canary
+      stableService: airflow-webserver-stable
+
+      trafficRouting:
+        nginx:
+          stableIngress: airflow-ingress-stable
+          additionalIngressAnnotations:
+            nginx.ingress.kubernetes.io/canary: "true"
+            nginx.ingress.kubernetes.io/canary-by-header: "X-Canary"
+            nginx.ingress.kubernetes.io/canary-by-header-value: "true"
+            nginx.ingress.kubernetes.io/canary-weight: "0"
+
+      steps:
+        - setWeight: 0
+        - pause:
+            duration: 10m
+
+        - setWeight: 20
+        - pause:
+            duration: 10m
+
+        - analysis:
+            templates:
+              - templateName: api-canary-analysis
+            args:
+              - name: service-name
+                value: airflow-webserver-canary
+              - name: namespace
+                value: prod
+
+        - pause: {}
+
+        - setWeight: 100
+
+      maxSurge: 1
+      maxUnavailable: 0
+      scaleDownDelaySeconds: 60
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-webserver-stable
+  namespace: prod
+  labels:
+    app: airflow
+    component: webserver
+    role: stable
+spec:
+  selector:
+    app: airflow
+    component: webserver
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-webserver-canary
+  namespace: prod
+  labels:
+    app: airflow
+    component: webserver
+    role: canary
+spec:
+  selector:
+    app: airflow
+    component: webserver
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: airflow-scheduler
+  namespace: prod
+  labels:
+    app: airflow
+    component: scheduler
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+
+  selector:
+    matchLabels:
+      app: airflow
+      component: scheduler
+
+  template:
+    metadata:
+      labels:
+        app: airflow
+        component: scheduler
+    spec:
+      serviceAccountName: airflow-sa
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 50000
+        fsGroup: 50000
+
+      containers:
+        - name: airflow-scheduler
+          image: 123456789.dkr.ecr.ap-southeast-1.amazonaws.com/coraline/webapp-airflow:PLACEHOLDER
+          args: ["scheduler"]
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >
+                  airflow jobs check
+                  --job-type SchedulerJob
+                  --hostname "$(hostname)"
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            failureThreshold: 5
+
+          envFrom:
+            - configMapRef:
+                name: airflow-config-prod
+
+          env:
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-db-credentials
+                  key: connection_string
+            - name: AIRFLOW__CELERY__BROKER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-redis-credentials
+                  key: broker_url
+            - name: AIRFLOW__CORE__FERNET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-secrets
+                  key: fernet_key
+
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+              readOnly: true
+            - name: logs
+              mountPath: /opt/airflow/logs
+
+      volumes:
+        - name: dags
+          persistentVolumeClaim:
+            claimName: airflow-dags-pvc
+            readOnly: true
+        - name: logs
+          persistentVolumeClaim:
+            claimName: airflow-logs-pvc
+
+  strategy:
+    blueGreen:
+      activeService: airflow-scheduler-active
+      previewService: airflow-scheduler-preview
+      autoPromotionEnabled: false
+      scaleDownDelaySeconds: 60
+      previewReplicaCount: 1
+
+      prePromotionAnalysis:
+        templates:
+          - templateName: api-canary-analysis
+        args:
+          - name: service-name
+            value: airflow-scheduler-preview
+          - name: namespace
+            value: prod
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-scheduler-active
+  namespace: prod
+  labels:
+    app: airflow
+    component: scheduler
+    role: active
+spec:
+  selector:
+    app: airflow
+    component: scheduler
+  ports:
+    - port: 8793
+      targetPort: 8793
+      name: worker-log
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-scheduler-preview
+  namespace: prod
+  labels:
+    app: airflow
+    component: scheduler
+    role: preview
+spec:
+  selector:
+    app: airflow
+    component: scheduler
+  ports:
+    - port: 8793
+      targetPort: 8793
+      name: worker-log
+  type: ClusterIP

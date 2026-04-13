@@ -1,0 +1,284 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: api-service
+  namespace: prod
+  labels:
+    app: api-service
+    version: canary
+  annotations:
+    notifications.argoproj.io/subscribe.on-rollout-step-completed.slack: platform-releases
+    notifications.argoproj.io/subscribe.on-rollout-completed.slack: platform-releases
+    notifications.argoproj.io/subscribe.on-analysis-error.pagerduty: oncall
+    notifications.argoproj.io/subscribe.on-rollout-aborted.pagerduty: oncall
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+
+  selector:
+    matchLabels:
+      app: api-service
+
+  template:
+    metadata:
+      labels:
+        app: api-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: api-sa
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: api
+          image: 123456789.dkr.ecr.ap-southeast-1.amazonaws.com/coraline/webapp-api:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          startupProbe:
+            httpGet:
+              path: /api/v1/health/live
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health/live
+              port: 8000
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          envFrom:
+            - configMapRef:
+                name: api-config-prod
+
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: api-db-credentials
+                  key: password
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: api-db-credentials
+                  key: host
+            - name: EXTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: api-external-keys
+                  key: partner_api_key
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /app/.cache
+
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+        - name: cache
+          emptyDir:
+            sizeLimit: 200Mi
+
+      terminationGracePeriodSeconds: 30
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: api-service
+
+  strategy:
+    canary:
+      canaryService: api-service-canary
+      stableService: api-service-stable
+
+      trafficRouting:
+        nginx:
+          stableIngress: api-ingress-stable
+          additionalIngressAnnotations:
+            nginx.ingress.kubernetes.io/canary: "true"
+            nginx.ingress.kubernetes.io/canary-weight: "0"
+
+      steps:
+        - setWeight: 10
+        - pause:
+            duration: 2m
+
+        - analysis:
+            templates:
+              - templateName: api-canary-analysis
+            args:
+              - name: service-name
+                value: api-service-canary
+              - name: namespace
+                value: prod
+
+        - setWeight: 25
+        - pause:
+            duration: 5m
+
+        - analysis:
+            templates:
+              - templateName: api-canary-analysis
+            args:
+              - name: service-name
+                value: api-service-canary
+              - name: namespace
+                value: prod
+
+        - setWeight: 50
+        - pause:
+            duration: 5m
+
+        - analysis:
+            templates:
+              - templateName: api-canary-analysis
+            args:
+              - name: service-name
+                value: api-service-canary
+              - name: namespace
+                value: prod
+
+        - pause: {}
+
+        - setWeight: 100
+
+      autoPromotionEnabled: false
+      scaleDownDelaySeconds: 30
+      maxSurge: "25%"
+      maxUnavailable: 0
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-service-stable
+  namespace: prod
+  labels:
+    app: api-service
+    role: stable
+spec:
+  selector:
+    app: api-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-service-canary
+  namespace: prod
+  labels:
+    app: api-service
+    role: canary
+spec:
+  selector:
+    app: api-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-service-pdb
+  namespace: prod
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: api-service
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-service-hpa
+  namespace: prod
+spec:
+  scaleTargetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: api-service
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30

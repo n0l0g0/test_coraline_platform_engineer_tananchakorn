@@ -1,0 +1,223 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: api-canary-analysis
+  namespace: prod
+  labels:
+    app: api-service
+    type: canary-analysis
+spec:
+  args:
+    - name: service-name
+    - name: namespace
+
+  metrics:
+    - name: http-5xx-error-rate
+      interval: 30s
+      count: 10
+      failureLimit: 1
+      successCondition: result[0] < 0.01
+
+      provider:
+        prometheus:
+          address: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            sum(
+              rate(
+                http_requests_total{
+                  namespace="{{args.namespace}}",
+                  service="{{args.service-name}}",
+                  status=~"5.."
+                }[2m]
+              )
+            )
+            /
+            sum(
+              rate(
+                http_requests_total{
+                  namespace="{{args.namespace}}",
+                  service="{{args.service-name}}"
+                }[2m]
+            )
+          ) OR on() vector(0)
+
+    - name: p99-latency
+      interval: 30s
+      count: 10
+      failureLimit: 1
+      successCondition: result[0] < 0.5
+
+      provider:
+        prometheus:
+          address: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            histogram_quantile(
+              0.99,
+              sum(
+                rate(
+                  http_request_duration_seconds_bucket{
+                    namespace="{{args.namespace}}",
+                    service="{{args.service-name}}"
+                  }[2m]
+                )
+              ) by (le)
+            )
+
+    - name: pod-restart-count
+      interval: 60s
+      count: 5
+      failureLimit: 0
+      successCondition: result[0] == 0
+
+      provider:
+        prometheus:
+          address: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            sum(
+              increase(
+                kube_pod_container_status_restarts_total{
+                  namespace="{{args.namespace}}",
+                  pod=~"api-service-canary-.*"
+                }[5m]
+              )
+            )
+
+    - name: http-success-rate
+      interval: 30s
+      count: 10
+      failureLimit: 1
+      successCondition: result[0] > 0.99
+
+      provider:
+        prometheus:
+          address: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            sum(
+              rate(
+                http_requests_total{
+                  namespace="{{args.namespace}}",
+                  service="{{args.service-name}}",
+                  status=~"2..|3.."
+                }[2m]
+              )
+            )
+            /
+            sum(
+              rate(
+                http_requests_total{
+                  namespace="{{args.namespace}}",
+                  service="{{args.service-name}}"
+                }[2m]
+            )
+          ) OR on() vector(1)
+
+    - name: canary-cpu-usage
+      interval: 60s
+      count: 5
+      failureLimit: 2
+      successCondition: result[0] < 90
+
+      provider:
+        prometheus:
+          address: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            avg(
+              rate(
+                container_cpu_usage_seconds_total{
+                  namespace="{{args.namespace}}",
+                  pod=~"api-service-canary-.*",
+                  container="api"
+                }[2m]
+              )
+            ) * 100
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: frontend-canary-analysis
+  namespace: prod
+  labels:
+    app: frontend
+    type: canary-analysis
+spec:
+  args:
+    - name: service-name
+    - name: namespace
+    - name: canary-url
+
+  metrics:
+    - name: frontend-availability
+      interval: 30s
+      count: 10
+      failureLimit: 1
+      successCondition: result == "Successful"
+
+      provider:
+        web:
+          url: "{{args.canary-url}}/health"
+          timeoutSeconds: 10
+          jsonPath: "{$.status}"
+
+    - name: nginx-5xx-rate
+      interval: 30s
+      count: 10
+      failureLimit: 1
+      successCondition: result[0] < 0.01
+
+      provider:
+        prometheus:
+          address: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            sum(
+              rate(
+                nginx_ingress_controller_requests{
+                  namespace="{{args.namespace}}",
+                  service="{{args.service-name}}",
+                  status=~"5.."
+                }[2m]
+              )
+            )
+            /
+            sum(
+              rate(
+                nginx_ingress_controller_requests{
+                  namespace="{{args.namespace}}",
+                  service="{{args.service-name}}"
+                }[2m]
+              )
+            ) OR on() vector(0)
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ClusterAnalysisTemplate
+metadata:
+  name: global-error-budget
+  labels:
+    type: shared-analysis
+spec:
+  metrics:
+    - name: global-5xx-budget
+      interval: 60s
+      count: 3
+      failureLimit: 0
+      successCondition: result[0] < 0.02
+
+      provider:
+        prometheus:
+          address: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            sum(
+              rate(
+                http_requests_total{
+                  namespace="prod",
+                  status=~"5.."
+                }[5m]
+              )
+            )
+            /
+            sum(
+              rate(
+                http_requests_total{namespace="prod"}[5m]
+              )
+            ) OR on() vector(0)
