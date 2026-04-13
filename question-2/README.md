@@ -56,15 +56,13 @@ See: [`diagram/architecture.html`](diagram/architecture.html)
 ### Infrastructure per Environment (Terraform workspaces)
 
 ```bash
-# Deploy dev infrastructure
+
 terraform workspace select dev
 terraform apply -var-file=environments/dev.tfvars
 
-# Deploy staging infrastructure
 terraform workspace select staging
 terraform apply -var-file=environments/staging.tfvars
 
-# Deploy prod infrastructure
 terraform workspace select prod
 terraform apply -var-file=environments/prod.tfvars
 ```
@@ -87,7 +85,7 @@ charts/api/
 
 Example override pattern:
 ```yaml
-# values.prod.yaml
+
 replicaCount: 3
 resources:
   limits:
@@ -189,7 +187,7 @@ See: [`diagram/cicd-pipeline.html`](diagram/cicd-pipeline.html)
 ### Health Checks (per service)
 
 ```yaml
-# Kubernetes health probes — example for API service
+
 livenessProbe:
   httpGet:
     path: /api/v1/health/live
@@ -275,14 +273,13 @@ Severity INFO     → Grafana annotation only
 ### Hotfix Process
 
 ```bash
-# Create hotfix branch from main
+
 git checkout -b hotfix/fix-critical-bug main
 
-# Fix, test, PR → fast-track review
+
 git push origin hotfix/fix-critical-bug
 
-# After CI passes + single approver review
-# Merge → auto-deploy to dev → fast-track to prod (skip staging for critical P0)
+
 ```
 
 ---
@@ -343,19 +340,19 @@ question-2/k8s/
 ### CLI Commands
 
 ```bash
-# Watch canary progress live
+
 kubectl argo rollouts get rollout api-service -n prod --watch
 
-# Promote to next step (pass a pause)
+
 kubectl argo rollouts promote api-service -n prod
 
-# Abort and restore stable immediately
+
 kubectl argo rollouts abort api-service -n prod
 
-# Full promotion (skip all steps — emergency only)
+
 kubectl argo rollouts promote api-service -n prod --full
 
-# Open Argo Rollouts UI dashboard
+
 kubectl argo rollouts dashboard -n prod
 ```
 

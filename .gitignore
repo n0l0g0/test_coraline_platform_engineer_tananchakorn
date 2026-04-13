@@ -36,3 +36,11 @@ __pycache__/
 # Node
 node_modules/
 .npm/
+
+claude.md
+CLAUDE.md
+.claude/
+skills-lock.json
+skills/
+.agents/
+.trae/

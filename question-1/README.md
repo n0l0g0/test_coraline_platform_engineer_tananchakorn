@@ -107,7 +107,7 @@ docker compose up -d
 
 ```bash
 docker compose logs -f metabase
-# Ready when you see: "Metabase Initialization COMPLETE"
+
 ```
 
 ### 3. Open Metabase
@@ -130,19 +130,19 @@ Complete the setup wizard. When asked for a database to connect, use:
 ### 4. Useful commands
 
 ```bash
-# Check container status
+
 docker compose ps
 
-# Check Metabase health
+
 curl -s http://localhost:3000/api/health
 
-# Connect to PostgreSQL directly
+
 docker compose exec postgres psql -U testcoraline -d testcoralineappdb
 
-# Stop the stack
+
 docker compose down
 
-# Stop and remove volumes (full reset)
+
 docker compose down -v
 ```
 
@@ -191,13 +191,13 @@ metabase_desired_count = 1
 ### 3. Initialize and deploy
 
 ```bash
-# Initialize Terraform and download providers
+
 terraform init
 
-# Preview the execution plan
+
 terraform plan -out=tfplan
 
-# Apply the plan
+
 terraform apply tfplan
 ```
 
@@ -216,23 +216,23 @@ Wait approximately **3–5 minutes** for ECS tasks to start and pass health chec
 ### 1. Verify Metabase is accessible
 
 ```bash
-# Get the ALB DNS name
+
 ALB_DNS=$(terraform output -raw alb_dns_name)
 
-# Health check endpoint
+
 curl -s "https://${ALB_DNS}/api/health"
-# Expected: {"status":"ok"}
+
 ```
 
 ### 2. Verify PostgreSQL is NOT publicly accessible
 
 ```bash
-# Get the RDS endpoint
+
 RDS_HOST=$(terraform output -raw rds_endpoint)
 
-# This should FAIL — RDS has no public route
+
 psql -h "${RDS_HOST}" -U metabase_admin -d metabase -c "SELECT 1;" 2>&1
-# Expected: Connection timed out (no route to host)
+
 ```
 
 ### 3. Verify secrets are correctly set
@@ -257,14 +257,14 @@ aws ecs describe-services \
 ## How to Destroy
 
 ```bash
-# Remove deletion protection first
+
 terraform apply -var="db_deletion_protection=false" -target=aws_db_instance.metabase
 
-# Then destroy all resources
+
 terraform destroy
 ```
 
-> ⚠️ A final RDS snapshot is created automatically before deletion.
+
 
 ---
 
